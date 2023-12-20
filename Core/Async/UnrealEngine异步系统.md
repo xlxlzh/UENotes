@@ -598,3 +598,51 @@ IQueuedWork* ReturnToPoolOrGetNextJob(FQueuedThread* InQueuedThread)
 ```
 
 #### TaskGraph的实现
+```plantuml
+@startuml
+abstract class FBaseGraphTask
+{
+	- virtual void ExecuteTask(TArray<FBaseGraphTask*>& NewTasks, ENamedThreads::Type CurrentThread, bool bDeleteOnCompletion)
+	- virtual void DeleteTask()
+
+}
+
+class FConstructor<T>
+{
+	+ FGraphEventRef ConstructAndDispatchWhenReady(T&&... Args)
+	+ TGraphTask* ConstructAndHold(T&&... Args)
+}
+
+class FGraphEvent
+{
+	{static} + FGraphEventRef CreateGraphEvent()
+	+ bool AddSubsequent(class FBaseGraphTask* Subsequent)
+	+ void DispatchSubsequents(ENamedThreads::Type CurrentThreadIfKnown = ENamedThreads::AnyThread)
+	+ void DispatchSubsequents(TArray<FBaseGraphTask*>& NewTasks, ENamedThreads::Type CurrentThreadIfKnown = ENamedThreads::AnyThread, bool bInternal = false)
+
+	- TClosableLockFreePointerListUnorderedSingleConsumer<FBaseGraphTask, 0>	SubsequentList
+	- FGraphEventArray EventsToWaitFor
+	- FThreadSafeCounter ReferenceCount
+}
+
+class TGraphTask<TTask>
+{
+	{static} + FConstructor CreateTask(const FGraphEventArray* Prerequisites = NULL, ENamedThreads::Type CurrentThreadIfKnown = ENamedThreads::AnyThread)
+	
+	- void ExecuteTask(TArray<FBaseGraphTask*>& NewTasks, ENamedThreads::Type CurrentThread, bool bDeleteOnCompletion)
+	- void DeleteTask()
+	- void SetupPrereqs(const FGraphEventArray* Prerequisites, ENamedThreads::Type CurrentThreadIfKnown, bool bUnlock)
+	- FGraphEventRef Setup(const FGraphEventArray* Prerequisites = NULL, ENamedThreads::Type CurrentThreadIfKnown = ENamedThreads::AnyThread)
+	- TGraphTask* Hold(const FGraphEventArray* Prerequisites = NULL, ENamedThreads::Type CurrentThreadIfKnown = ENamedThreads::AnyThread)
+
+	- TAlignedBytes<sizeof(TTask),alignof(TTask)> TaskStorage
+	- bool TaskConstructed
+	- FGraphEventRef Subsequents
+}
+
+FBaseGraphTask <|-- TGraphTask
+FConstructor <.. TGraphTask
+FGraphEvent *-- TGraphTask
+
+@enduml
+```
