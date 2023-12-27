@@ -5,25 +5,25 @@
 <!-- code_chunk_output -->
 
 - [Unreal Engine中的异步系统](#unreal-engine中的异步系统)
-  - [类图Overall](#类图overall)
-  - [FRunnableThread 和 FRunnable实现](#frunnablethread-和-frunnable实现)
-    - [FRunnableThread](#frunnablethread)
-    - [FRunnable相关实现](#frunnable相关实现)
-    - [FThreadManager](#fthreadmanager)
-  - [异步任务的实现](#异步任务的实现)
-    - [队列化任务的实现](#队列化任务的实现)
-      - [FQueuedThread](#fqueuedthread)
-      - [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
-    - [TaskGraph的实现](#taskgraph的实现)
-    - [FTaskGraphInterface和FTaskGraphImplementation](#ftaskgraphinterface和ftaskgraphimplementation)
-      - [FTaskGraphInterface初始化](#ftaskgraphinterface初始化)
-      - [AnyThread](#anythread)
-      - [NamedThread](#namedthread)
-    - [FBaseGraphTask](#fbasegraphtask)
-      - [模板参数TTask](#模板参数ttask)
-      - [FConstructor](#fconstructor)
-    - [FGraphEvent](#fgraphevent)
-    - [TaskGraph运行流程](#taskgraph运行流程)
+	- [类图Overall](#类图overall)
+	- [FRunnableThread 和 FRunnable实现](#frunnablethread-和-frunnable实现)
+		- [FRunnableThread](#frunnablethread)
+		- [FRunnable相关实现](#frunnable相关实现)
+		- [FThreadManager](#fthreadmanager)
+	- [异步任务的实现](#异步任务的实现)
+		- [队列化任务的实现](#队列化任务的实现)
+			- [FQueuedThread](#fqueuedthread)
+			- [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
+		- [TaskGraph的实现](#taskgraph的实现)
+		- [FTaskGraphInterface](#ftaskgraphinterface)
+			- [AnyThread](#anythread)
+			- [NamedThread](#namedthread)
+			- [FTaskGraphImplementation](#ftaskgraphimplementation)
+		- [FBaseGraphTask](#fbasegraphtask)
+			- [模板参数TTask](#模板参数ttask)
+			- [FConstructor](#fconstructor)
+		- [FGraphEvent](#fgraphevent)
+		- [TaskGraph运行流程](#taskgraph运行流程)
 
 <!-- /code_chunk_output -->
 
@@ -728,17 +728,22 @@ class FTaskGraphImplementation
 }
 
 FTaskGraphInterface <|-- FTaskGraphImplementation
-FBaseGraphTask <|-- FTaskGraphImplementation
-
-
+FBaseGraphTask *-- FTaskGraphImplementation
 FWorkerThread *-- FTaskGraphImplementation
+
+class FTaskGraphCompatibilityImplementation
+{
+	
+}
+
+FTaskGraphInterface <|-- FTaskGraphCompatibilityImplementation
 
 
 @enduml
 ```
-#### FTaskGraphInterface和FTaskGraphImplementation
-在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation来完成，是一个单例类。
-在TaskGraph中，有两中类型的线程，一个是NamedThread，一个是AnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
+#### FTaskGraphInterface
+在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation和FTaskGraphCompatibilityImplementation来完成，是一个单例类。
+在TaskGraph中，有两中类型的线程，一个是NamedThread，一个是AnyThread。分别对应FNamedTaskThread和FTaskThreadAnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
 - RHIThread RHI线程
 - GameThread 游戏线程
 - RenderThread 渲染线程
@@ -760,8 +765,199 @@ enum Type : int32
 }
 ```
 
-##### FTaskGraphInterface初始化
-FTaskGraphInterface在初始化时候，会根据当前系统的核心数量和配置初始化一定数量的Worker。对于AnyThread，还会创建其对应的FRunnableThread，计算对应线程的Affinity。
+对于TaskGraph中的任务和线程也分别有不同的优先级。有普通和高优先级的任务，也有各种不同优先级的线程。
+- NormalTaskPriority  普通优先级任务
+- HighTaskPriority  高优先级任务
+- NormalThreadPriority  普通优先级线程
+- HighThreadPriority  高优先级线程
+- BackgroundThreadPriority  低优先级线程
+
+然后还可以通过这些不同的flag进行组合，组合成不同类型。同时由于这些Flag占用了不同位，所以也可以通过位运算，将其中的不同的属性单独拿出来。UE中也定义了相应的函数。最后这些所有属性的组合决定了我们当前的任务在哪一个线程中来运行。例如AnyHiPriThreadNormalTask就是运行在一个高优先级AnyThread的普通优先级的任务。
+
+```cpp
+enum Type : int32
+{
+	 ...
+
+	MainQueue =			0x000,
+	LocalQueue =		0x100,
+
+	NumQueues =			2,
+	ThreadIndexMask =	0xff,
+	QueueIndexMask =	0x100,
+	QueueIndexShift =	8,
+
+	/** High bits are used for a queue index task priority and thread priority**/
+
+	NormalTaskPriority =	0x000,
+	HighTaskPriority =		0x200,
+
+	NumTaskPriorities =		2,
+	TaskPriorityMask =		0x200,
+	TaskPriorityShift =		9,
+
+	NormalThreadPriority = 0x000,
+	HighThreadPriority = 0x400,
+	BackgroundThreadPriority = 0x800,
+
+	NumThreadPriorities = 3,
+	ThreadPriorityMask = 0xC00,
+	ThreadPriorityShift = 10,
+
+	/** Combinations **/
+	GameThread_Local = GameThread | LocalQueue,
+	ActualRenderingThread_Local = ActualRenderingThread | LocalQueue,
+
+	AnyHiPriThreadNormalTask = AnyThread | HighThreadPriority | NormalTaskPriority,
+	AnyHiPriThreadHiPriTask = AnyThread | HighThreadPriority | HighTaskPriority,
+
+	AnyNormalThreadNormalTask = AnyThread | NormalThreadPriority | NormalTaskPriority,
+	AnyNormalThreadHiPriTask = AnyThread | NormalThreadPriority | HighTaskPriority,
+
+	AnyBackgroundThreadNormalTask = AnyThread | BackgroundThreadPriority | NormalTaskPriority,
+	AnyBackgroundHiPriTask = AnyThread | BackgroundThreadPriority | HighTaskPriority,
+};
+
+//辅助函数，用于设置和获取不同的Flag
+FORCEINLINE Type GetThreadIndex(Type ThreadAndIndex)
+{
+	return ((ThreadAndIndex & ThreadIndexMask) == AnyThread) ? AnyThread : Type(ThreadAndIndex & ThreadIndexMask);
+}
+
+FORCEINLINE int32 GetQueueIndex(Type ThreadAndIndex)
+{
+	return (ThreadAndIndex & QueueIndexMask) >> QueueIndexShift;
+}
+
+FORCEINLINE int32 GetTaskPriority(Type ThreadAndIndex)
+{
+	return (ThreadAndIndex & TaskPriorityMask) >> TaskPriorityShift;
+}
+
+FORCEINLINE int32 GetThreadPriorityIndex(Type ThreadAndIndex)
+{
+	int32 Result = (ThreadAndIndex & ThreadPriorityMask) >> ThreadPriorityShift;
+	check(Result >= 0 && Result < NumThreadPriorities);
+	return Result;
+}
+
+FORCEINLINE Type SetPriorities(Type ThreadAndIndex, Type ThreadPriority, Type TaskPriority)
+{
+	check(
+		!(ThreadAndIndex & ~ThreadIndexMask) &&  // not a thread index
+		!(ThreadPriority & ~ThreadPriorityMask) && // not a thread priority
+		(ThreadPriority & ThreadPriorityMask) != ThreadPriorityMask && // not a valid thread priority
+		!(TaskPriority & ~TaskPriorityMask) // not a task priority
+		);
+	return Type(ThreadAndIndex | ThreadPriority | TaskPriority);
+}
+
+FORCEINLINE Type SetPriorities(Type ThreadAndIndex, int32 PriorityIndex, bool bHiPri)
+{
+	check(
+		!(ThreadAndIndex & ~ThreadIndexMask) && // not a thread index
+		PriorityIndex >= 0 && PriorityIndex < NumThreadPriorities // not a valid thread priority
+		);
+	return Type(ThreadAndIndex | (PriorityIndex << ThreadPriorityShift) | (bHiPri ? HighTaskPriority : NormalTaskPriority));
+}
+
+FORCEINLINE Type SetThreadPriority(Type ThreadAndIndex, Type ThreadPriority)
+{
+	check(
+		!(ThreadAndIndex & ~ThreadIndexMask) &&  // not a thread index
+		!(ThreadPriority & ~ThreadPriorityMask) && // not a thread priority
+		(ThreadPriority & ThreadPriorityMask) != ThreadPriorityMask // not a valid thread priority
+		);
+	return Type(ThreadAndIndex | ThreadPriority);
+}
+
+FORCEINLINE Type SetTaskPriority(Type ThreadAndIndex, Type TaskPriority)
+{
+	check(
+		!(ThreadAndIndex & ~ThreadIndexMask) &&  // not a thread index
+		!(TaskPriority & ~TaskPriorityMask) // not a task priority
+		);
+	return Type(ThreadAndIndex | TaskPriority);
+}
+```
+
+##### AnyThread
+对于AnyThread而言，会在初始化的时候，根据当前系统和CPU的核心数量，还有相应的config来决定创建多少AnyThread。对于AnyThread而言，又有线程集（Thread Set）和线程优先级（Thread Priority）的概念。
+- 线程优先级
+TaskGraph中有三个优先级的线程，分别是Normal, High, Background。High的优先级最高，Background的优先级最低。
+
+- 线程集
+一组由多个优先级的线程组成的集合叫线程集，一个线程集至少有一个线程，最多有三个线程。由是否创建高优先级和低优先级线程来决定的。
+```cpp
+NumTaskThreadSets = 1 + bCreatedHiPriorityThreads + bCreatedBackgroundPriorityThreads
+```
+
+##### NamedThread
+NamedTread是通过外部设置到TaskGraph中来的，并未TaskGraph内部创建的。可以通过函数**FTaskGraphInterface::AttachToThread**来设置NamedThread。
+```cpp
+virtual void AttachToThread(ENamedThreads::Type CurrentThread) final override
+{
+	CurrentThread = ENamedThreads::GetThreadIndex(CurrentThread);
+	check(NumTaskThreadsPerSet);
+	check(CurrentThread >= 0 && CurrentThread < NumNamedThreads);
+	check(!WorkerThreads[CurrentThread].bAttached);
+	Thread(CurrentThread).InitializeForCurrentThread();
+}
+```
+GameThread和RenderThread这些NamedThread都会在线程创建成功后，就把对应的线程Attach到TaskGraph中来。
+```cpp
+void RenderingThreadMain( FEvent* TaskGraphBoundSyncEvent )
+{
+	LLM_SCOPE(ELLMTag::RenderingThreadMemory);
+
+	ENamedThreads::Type RenderThread = ENamedThreads::Type(ENamedThreads::ActualRenderingThread);
+
+	ENamedThreads::SetRenderThread(RenderThread);
+	ENamedThreads::SetRenderThread_Local(ENamedThreads::Type(ENamedThreads::ActualRenderingThread_Local));
+
+	FTaskGraphInterface::Get().AttachToThread(RenderThread);
+	...
+}
+
+// FRHIThread::Run
+virtual uint32 Run() override
+{
+	LLM_SCOPE(ELLMTag::RHIMisc);
+
+#if CSV_PROFILER
+	FCsvProfiler::Get()->SetRHIThreadId(FPlatformTLS::GetCurrentThreadId());
+#endif
+
+	FMemory::SetupTLSCachesOnCurrentThread();
+	{
+		FTaskTagScope Scope(ETaskTag::ERhiThread);
+		FPlatformProcess::SetupRHIThread();
+		FTaskGraphInterface::Get().AttachToThread(ENamedThreads::RHIThread);
+		FTaskGraphInterface::Get().ProcessThreadUntilRequestReturn(ENamedThreads::RHIThread);
+	}
+	FMemory::ClearAndDisableTLSCachesOnCurrentThread();
+	return 0;
+}
+
+int32 FEngineLoop::PreInitPreStartupScreen(const TCHAR* CmdLine)
+{
+	....
+
+	if (bCreateTaskGraphAndThreadPools)
+	{
+		// initialize task graph sub-system with potential multiple threads
+		SCOPED_BOOT_TIMING("FTaskGraphInterface::Startup");
+		FTaskGraphInterface::Startup(FPlatformMisc::NumberOfWorkerThreadsToSpawn());
+		FTaskGraphInterface::Get().AttachToThread(ENamedThreads::GameThread);
+	}
+
+	...
+}
+
+```
+
+##### FTaskGraphImplementation
+FTaskGraphImplementation在初始化时候，会根据当前系统的核心数量和配置初始化一定数量的Worker。对于AnyThread，还会创建其对应的FRunnableThread，计算对应线程的Affinity。
 当前系统的核心数会决定线程集的数量，而每个线程集中的线程数量取决于**ENamedThreads::bHasHighPriorityThreads和ENamedThreads::bHasBackgroundThreads**。最终Worker的数量计算公式为：**NumTaskThreads * NumTaskThreadSets + NumNamedThreads**，然后根据实际的情况进行clamp。
 ```cpp
 FTaskGraphImplementation(int32)
@@ -879,79 +1075,10 @@ FTaskGraphImplementation(int32)
 }
 ```
 
-##### AnyThread
-对于AnyThread而言，会在初始化的时候，根据当前系统和CPU的核心数量，还有相应的config来决定创建多少AnyThread。对于AnyThread而言，又有线程集（Thread Set）和线程优先级（Thread Priority）的概念。
-- 线程优先级
-TaskGraph中有三个优先级的线程，分别是Normal, High, Background。High的优先级最高，Background的优先级最低。
-
-- 线程集
-一组由多个优先级的线程组成的集合叫线程集，一个线程集至少有一个线程，最多有三个线程。由是否创建高优先级和低优先级线程来决定的。
-```cpp
-NumTaskThreadSets = 1 + bCreatedHiPriorityThreads + bCreatedBackgroundPriorityThreads
-```
-
-##### NamedThread
-NamedTread是通过外部设置到TaskGraph中来的，并未TaskGraph内部创建的。可以通过函数**FTaskGraphInterface::AttachToThread**来设置NamedThread。
-```cpp
-virtual void AttachToThread(ENamedThreads::Type CurrentThread) final override
-{
-	CurrentThread = ENamedThreads::GetThreadIndex(CurrentThread);
-	check(NumTaskThreadsPerSet);
-	check(CurrentThread >= 0 && CurrentThread < NumNamedThreads);
-	check(!WorkerThreads[CurrentThread].bAttached);
-	Thread(CurrentThread).InitializeForCurrentThread();
-}
-```
-GameThread和RenderThread这些NamedThread都会在线程创建成功后，就把对应的线程Attach到TaskGraph中来。
-```cpp
-void RenderingThreadMain( FEvent* TaskGraphBoundSyncEvent )
-{
-	LLM_SCOPE(ELLMTag::RenderingThreadMemory);
-
-	ENamedThreads::Type RenderThread = ENamedThreads::Type(ENamedThreads::ActualRenderingThread);
-
-	ENamedThreads::SetRenderThread(RenderThread);
-	ENamedThreads::SetRenderThread_Local(ENamedThreads::Type(ENamedThreads::ActualRenderingThread_Local));
-
-	FTaskGraphInterface::Get().AttachToThread(RenderThread);
-	...
-}
-
-// FRHIThread::Run
-virtual uint32 Run() override
-{
-	LLM_SCOPE(ELLMTag::RHIMisc);
-
-#if CSV_PROFILER
-	FCsvProfiler::Get()->SetRHIThreadId(FPlatformTLS::GetCurrentThreadId());
-#endif
-
-	FMemory::SetupTLSCachesOnCurrentThread();
-	{
-		FTaskTagScope Scope(ETaskTag::ERhiThread);
-		FPlatformProcess::SetupRHIThread();
-		FTaskGraphInterface::Get().AttachToThread(ENamedThreads::RHIThread);
-		FTaskGraphInterface::Get().ProcessThreadUntilRequestReturn(ENamedThreads::RHIThread);
-	}
-	FMemory::ClearAndDisableTLSCachesOnCurrentThread();
-	return 0;
-}
-
-int32 FEngineLoop::PreInitPreStartupScreen(const TCHAR* CmdLine)
-{
-	....
-
-	if (bCreateTaskGraphAndThreadPools)
-	{
-		// initialize task graph sub-system with potential multiple threads
-		SCOPED_BOOT_TIMING("FTaskGraphInterface::Startup");
-		FTaskGraphInterface::Startup(FPlatformMisc::NumberOfWorkerThreadsToSpawn());
-		FTaskGraphInterface::Get().AttachToThread(ENamedThreads::GameThread);
-	}
-
-	...
-}
-
+从代码中可以看出，最终创建的线程都会放在**FTaskGraphImplementation::WorkderThreads**这个数组中，而且会按照顺序排列，所以我们就可以直接通过Index来获取当前Thread的属性，是执行什么任务的线程。
+```mermaid
+graph LR
+A[按顺序排列的NameThread] --> B[普通优先级线程] --> C[高优先级线程] --> D[低优先级线程]
 ```
 
 #### FBaseGraphTask
@@ -1062,5 +1189,23 @@ virtual void TriggerEventWhenTasksComplete(FEvent* InEvent, const FGraphEventArr
 #### TaskGraph运行流程
 ```mermaid
 graph TB
+DispathReady[ConstructAndDispatchWhenReady] --bUnlock=true--> SetupPrereqs[TGraphTask::SetupPrereqs] --> PreComplete[FBaseGraphTask::PrerequisitesComplete] -->Unlock{bUnlock}
+
+TaskQueueTask[FBaseGraphTask::QueueTask] --> InterfaceQueueTask{FTaskGraphInterface::QueueTask}
+
+Unlock -->|bUnlock=true| TaskQueueTask
+
+Hold[ConstructAndHold] --bUnnlock=false--> SetupPrereqs
+
+Unlock -->|bUnlock=false| WaitForUnlock[WaitForUnlock]
+WaitForUnlock --> ConditionalQueueTask[FBaseGraphTask::ConditionalQueueTask] --> TaskQueueTask
+
+InterfaceQueueTask -->|AnyThread| StartTaskThread[FTaskGraphImplementation::StartTaskThread]
+StartTaskThread --> WakeUp[FTaskThreadAnyThread::WakeUp] --> ProcessTasks[FTaskThreadAnyThread::ProcessTasks] --> Excute[FBaseGraphTask::Execute] --> ExcuteTask[TGraphTask::ExcuteTask]
+
+InterfaceQueueTask -->|NamedThread| NamedThreadChoice{ThreadToExecuteOn==CurrentThreadIfKnown}
+
+NamedThreadChoice -->|true| EnqueueFromThisThread[FTaskThreadBase::EnqueueFromThisThread]
+NamedThreadChoice -->|false| EnqueueFromOtherThread[FTaskThreadBase::EnqueueFromOtherThread]
 
 ```
