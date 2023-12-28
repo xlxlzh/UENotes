@@ -16,9 +16,10 @@
 			- [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
 		- [TaskGraph的实现](#taskgraph的实现)
 		- [FTaskGraphInterface](#ftaskgraphinterface)
-			- [AnyThread](#anythread)
-			- [NamedThread](#namedthread)
 			- [FTaskGraphImplementation](#ftaskgraphimplementation)
+		- [FTaskThreadBase](#ftaskthreadbase)
+			- [FTaskThreadAnyThread](#ftaskthreadanythread)
+			- [FNamedTaskThread](#fnamedtaskthread)
 		- [FBaseGraphTask](#fbasegraphtask)
 			- [模板参数TTask](#模板参数ttask)
 			- [FConstructor](#fconstructor)
@@ -743,6 +744,7 @@ FTaskGraphInterface <|-- FTaskGraphCompatibilityImplementation
 ```
 #### FTaskGraphInterface
 在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation和FTaskGraphCompatibilityImplementation来完成，是一个单例类。
+
 在TaskGraph中，有两中类型的线程，一个是NamedThread，一个是AnyThread。分别对应FNamedTaskThread和FTaskThreadAnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
 - RHIThread RHI线程
 - GameThread 游戏线程
@@ -881,7 +883,6 @@ FORCEINLINE Type SetTaskPriority(Type ThreadAndIndex, Type TaskPriority)
 }
 ```
 
-##### AnyThread
 对于AnyThread而言，会在初始化的时候，根据当前系统和CPU的核心数量，还有相应的config来决定创建多少AnyThread。对于AnyThread而言，又有线程集（Thread Set）和线程优先级（Thread Priority）的概念。
 - 线程优先级
 TaskGraph中有三个优先级的线程，分别是Normal, High, Background。High的优先级最高，Background的优先级最低。
@@ -892,7 +893,6 @@ TaskGraph中有三个优先级的线程，分别是Normal, High, Background。Hi
 NumTaskThreadSets = 1 + bCreatedHiPriorityThreads + bCreatedBackgroundPriorityThreads
 ```
 
-##### NamedThread
 NamedTread是通过外部设置到TaskGraph中来的，并未TaskGraph内部创建的。可以通过函数**FTaskGraphInterface::AttachToThread**来设置NamedThread。
 ```cpp
 virtual void AttachToThread(ENamedThreads::Type CurrentThread) final override
@@ -904,6 +904,7 @@ virtual void AttachToThread(ENamedThreads::Type CurrentThread) final override
 	Thread(CurrentThread).InitializeForCurrentThread();
 }
 ```
+
 GameThread和RenderThread这些NamedThread都会在线程创建成功后，就把对应的线程Attach到TaskGraph中来。
 ```cpp
 void RenderingThreadMain( FEvent* TaskGraphBoundSyncEvent )
@@ -958,6 +959,7 @@ int32 FEngineLoop::PreInitPreStartupScreen(const TCHAR* CmdLine)
 
 ##### FTaskGraphImplementation
 FTaskGraphImplementation在初始化时候，会根据当前系统的核心数量和配置初始化一定数量的Worker。对于AnyThread，还会创建其对应的FRunnableThread，计算对应线程的Affinity。
+
 当前系统的核心数会决定线程集的数量，而每个线程集中的线程数量取决于**ENamedThreads::bHasHighPriorityThreads和ENamedThreads::bHasBackgroundThreads**。最终Worker的数量计算公式为：**NumTaskThreads * NumTaskThreadSets + NumNamedThreads**，然后根据实际的情况进行clamp。
 ```cpp
 FTaskGraphImplementation(int32)
@@ -1081,8 +1083,21 @@ graph LR
 A[按顺序排列的NameThread] --> B[普通优先级线程] --> C[高优先级线程] --> D[低优先级线程]
 ```
 
+#### FTaskThreadBase
+FTaskThreadBase继承于FRunnable，是一个抽象类。FTaskThreadAnyThread和FNamedTaskThread都继承于它，是TaskGraph中的线程真正运行的对象。在TaskGraph运行的时候，FTaskThreadAnyThread和FNamedTaskThread会通过自己的运行逻辑，拿到真正需要的运行的FBaseGraphTask，从而运行真正的任务。
+
+FRunnable对象最后会被对应的线程调用FRunnable::Run中，所以FTaskThreadBase的主要运行逻辑也在FTaskThreadBase::Run中。FTaskThreadBase::Run中调用了FTaskThreadBase::ProcessTasksUntilQuit，而该函数是一个纯虚函数，所以对应的逻辑在子类中实现。
+
+##### FTaskThreadAnyThread
+FTaskThreadAnyThread 代表了两种线程中的AnyThread，它的数量会在FTaskGraphImplementation初始化的时候根据当前系统的核心数量以及一些配置来决定。
+
+##### FNamedTaskThread
+FNamedTaskThread 代表了两种线程中的NamedThread，它的数量和当前的设置和引擎的版本都有关。例如在UE4中，有Stats和Audio相关的NamedThread，在升级到UE5的时候被移除了。而且UE4中，也只有STATS宏打开的时候会有StatsThread。
+
+
 #### FBaseGraphTask
 FBaseGraphTask是TaskGraph中所有Task的基类，线程在执行任务时会调用FBaseGraphTask::ExecuteTask。FBaseGraphTask本身是一个抽象类，UE实现了一个模板类TGraphTask用于设置前置任务和后续任务。TGraphTask中还有一个辅助类FConstructor用于任务的创建。
+
 ##### 模板参数TTask
 TGraphTask中完善了设置前置任务和后置任务，以及执行任务的代码。由于是一个模板类，所以在实现中调用了一些模板的函数，所以实例化TGraphTask的模板参数需要满足一些条件。不然在生成模板代码的时候，会出现编译错误。UE在注释中给出了这个例子：
 ```cpp
