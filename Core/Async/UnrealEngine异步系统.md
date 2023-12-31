@@ -1089,10 +1089,112 @@ FTaskThreadBase继承于FRunnable，是一个抽象类。FTaskThreadAnyThread和
 FRunnable对象最后会被对应的线程调用FRunnable::Run中，所以FTaskThreadBase的主要运行逻辑也在FTaskThreadBase::Run中。FTaskThreadBase::Run中调用了FTaskThreadBase::ProcessTasksUntilQuit，而该函数是一个纯虚函数，所以对应的逻辑在子类中实现。
 
 ##### FTaskThreadAnyThread
-FTaskThreadAnyThread 代表了两种线程中的AnyThread，它的数量会在FTaskGraphImplementation初始化的时候根据当前系统的核心数量以及一些配置来决定。
+FTaskThreadAnyThread 代表了两种线程中的AnyThread，它的数量会在FTaskGraphImplementation初始化的时候根据当前系统的核心数量以及一些配置来决定。FTaskThreadAnyThread的主要函数为FTaskThreadAnyThread::ProcessTasks，这个函数会从FTaskGraphInterface中去寻找自己ThreadId所对应的任务。
+```cpp
+	uint64 ProcessTasks()
+	{
+		LLM_SCOPE_BYNAME(TEXT("Tasks/AnyThread/ProcessTasks"));
+
+		TStatId StallStatId;
+		bool bCountAsStall = true;
+		uint64 ProcessedTasks = 0;
+#if STATS
+		TStatId StatName;
+		FCycleCounter ProcessingTasks;
+		StatName = GET_STATID(STAT_TaskGraph_OtherTasks);
+		StallStatId = GET_STATID(STAT_TaskGraph_OtherStalls);
+		bool bTasksOpen = false;
+		if (FThreadStats::IsCollectingData(StatName))
+		{
+			bTasksOpen = true;
+			ProcessingTasks.Start(StatName);
+		}
+#endif
+		verify(++Queue.RecursionGuard == 1);
+		bool bDidStall = false;
+		while (1)
+		{
+			FBaseGraphTask* Task = FindWork();
+			if (!Task)
+			{
+#if STATS
+				if (bTasksOpen)
+				{
+					ProcessingTasks.Stop();
+					bTasksOpen = false;
+				}
+#endif
+
+				TestRandomizedThreads();
+				const bool bIsMultithread = FTaskGraphInterface::IsMultithread();
+				if (bIsMultithread)
+				{
+					FScopeCycleCounter Scope(StallStatId, EStatFlags::Verbose);
+					Queue.StallRestartEvent->Wait(MAX_uint32, bCountAsStall);
+					bDidStall = true;
+				}
+				if (Queue.QuitForShutdown || !bIsMultithread)
+				{
+					break;
+				}
+				TestRandomizedThreads();
+
+#if STATS
+				if (FThreadStats::IsCollectingData(StatName))
+				{
+					bTasksOpen = true;
+					ProcessingTasks.Start(StatName);
+				}
+#endif
+				continue;
+			}
+			TestRandomizedThreads();
+#if YIELD_BETWEEN_TASKS
+			// the Win scheduler is ill behaved and will sometimes let BG tasks run even when other tasks are ready....kick the scheduler between tasks
+			if (!bDidStall && PriorityIndex == (ENamedThreads::BackgroundThreadPriority >> ENamedThreads::ThreadPriorityShift))
+			{
+				FPlatformProcess::Sleep(0);
+			}
+#endif
+			bDidStall = false;
+			Task->Execute(NewTasks, ENamedThreads::Type(ThreadId), true);
+			ProcessedTasks++;
+			TestRandomizedThreads();
+			if (Queue.bStallForTuning)
+			{
+#if STATS
+				if (bTasksOpen)
+				{
+					ProcessingTasks.Stop();
+					bTasksOpen = false;
+				}
+#endif
+				{
+					FScopeLock Lock(&Queue.StallForTuning);
+				}
+#if STATS
+				if (FThreadStats::IsCollectingData(StatName))
+				{
+					bTasksOpen = true;
+					ProcessingTasks.Start(StatName);
+				}
+#endif
+			}
+		}
+		verify(!--Queue.RecursionGuard);
+		return ProcessedTasks;
+	}
+
+```
+
+可以从上面看出来，最终调用到了FBaseGraphTask::Excute。
 
 ##### FNamedTaskThread
 FNamedTaskThread 代表了两种线程中的NamedThread，它的数量和当前的设置和引擎的版本都有关。例如在UE4中，有Stats和Audio相关的NamedThread，在升级到UE5的时候被移除了。而且UE4中，也只有STATS宏打开的时候会有StatsThread。
+
+FNamedTaskThread相对于FTaskThreadAnyThread还多了一个Queue的区分，分为MainQueue和LocalQueue。
+- MainQueue
+- LocalQueu
 
 
 #### FBaseGraphTask
