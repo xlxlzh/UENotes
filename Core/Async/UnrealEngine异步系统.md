@@ -5,26 +5,26 @@
 <!-- code_chunk_output -->
 
 - [Unreal Engine中的异步系统](#unreal-engine中的异步系统)
-	- [类图Overall](#类图overall)
-	- [FRunnableThread 和 FRunnable实现](#frunnablethread-和-frunnable实现)
-		- [FRunnableThread](#frunnablethread)
-		- [FRunnable相关实现](#frunnable相关实现)
-		- [FThreadManager](#fthreadmanager)
-	- [异步任务的实现](#异步任务的实现)
-		- [队列化任务的实现](#队列化任务的实现)
-			- [FQueuedThread](#fqueuedthread)
-			- [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
-		- [TaskGraph的实现](#taskgraph的实现)
-		- [FTaskGraphInterface](#ftaskgraphinterface)
-			- [FTaskGraphImplementation](#ftaskgraphimplementation)
-		- [FTaskThreadBase](#ftaskthreadbase)
-			- [FTaskThreadAnyThread](#ftaskthreadanythread)
-			- [FNamedTaskThread](#fnamedtaskthread)
-		- [FBaseGraphTask](#fbasegraphtask)
-			- [模板参数TTask](#模板参数ttask)
-			- [FConstructor](#fconstructor)
-		- [FGraphEvent](#fgraphevent)
-		- [TaskGraph运行流程](#taskgraph运行流程)
+  - [类图Overall](#类图overall)
+  - [FRunnableThread 和 FRunnable实现](#frunnablethread-和-frunnable实现)
+    - [FRunnableThread](#frunnablethread)
+    - [FRunnable相关实现](#frunnable相关实现)
+    - [FThreadManager](#fthreadmanager)
+  - [异步任务的实现](#异步任务的实现)
+    - [队列化任务的实现](#队列化任务的实现)
+      - [FQueuedThread](#fqueuedthread)
+      - [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
+    - [TaskGraph的实现](#taskgraph的实现)
+    - [FTaskGraphInterface](#ftaskgraphinterface)
+      - [FTaskGraphImplementation](#ftaskgraphimplementation)
+    - [FTaskThreadBase](#ftaskthreadbase)
+      - [FTaskThreadAnyThread](#ftaskthreadanythread)
+      - [FNamedTaskThread](#fnamedtaskthread)
+    - [FBaseGraphTask](#fbasegraphtask)
+      - [模板参数TTask](#模板参数ttask)
+      - [FConstructor](#fconstructor)
+    - [FGraphEvent](#fgraphevent)
+    - [TaskGraph运行流程](#taskgraph运行流程)
 
 <!-- /code_chunk_output -->
 
@@ -672,6 +672,8 @@ abstract class FTaskThreadBase
 	# FWorkerThread* OwnerWorker
 }
 
+FBaseGraphTask *-- FTaskThreadBase
+
 FRunnable <|-- FTaskThreadBase
 
 struct FWorkerThread
@@ -888,7 +890,7 @@ FORCEINLINE Type SetTaskPriority(Type ThreadAndIndex, Type TaskPriority)
 TaskGraph中有三个优先级的线程，分别是Normal, High, Background。High的优先级最高，Background的优先级最低。
 
 - 线程集
-一组由多个优先级的线程组成的集合叫线程集，一个线程集至少有一个线程，最多有三个线程。由是否创建高优先级和低优先级线程来决定的。
+一组由多个同一优先级的线程组成的集合叫线程集，UE中至少有一个线程集，最多有三个线程集。线程集的数量和当前引擎的设置有关。下面的代码是线程集数量的计算方式：
 ```cpp
 NumTaskThreadSets = 1 + bCreatedHiPriorityThreads + bCreatedBackgroundPriorityThreads
 ```
