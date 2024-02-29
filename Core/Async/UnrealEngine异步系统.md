@@ -5,8 +5,10 @@
 <!-- code_chunk_output -->
 
 - [Unreal Engine中的异步系统](#unreal-engine中的异步系统)
-  - [类图Overall](#类图overall)
+  - [Overall](#overall)
+    - [类图](#类图)
   - [FRunnableThread 和 FRunnable实现](#frunnablethread-和-frunnable实现)
+    - [UE中使用异步任务的常用方式](#ue中使用异步任务的常用方式)
     - [FRunnableThread](#frunnablethread)
     - [FRunnable相关实现](#frunnable相关实现)
     - [FThreadManager](#fthreadmanager)
@@ -29,7 +31,8 @@
 <!-- /code_chunk_output -->
 
 
-### 类图Overall
+### Overall
+#### 类图
 ```plantuml
 @startuml
 class FRunnableThread
@@ -191,6 +194,67 @@ end note
 
 @enduml
 ```
+
+#### UE中使用异步任务的常用方式
+- Async函数
+	```cpp
+	template<typename CallableType>
+	auto Async(EAsyncExecution Execution, CallableType&& Callable, 	TUniqueFunction<void()> CompletionCallback = nullptr) -> 	TFuture<decltype(Forward<CallableType>(Callable)())>
+	```
+	其中第一个参数**EAsyncExecution Execution**指定了Async的运行方式，	它可以为下面几种情况：
+	- **TaskGraph** 通过TaskGraph来执行Task，可以使用**AsyncTask**函数
+	- **TaskGraphMainThread** 通过TaskGraph来执行，但是会在主线程上执	行
+	- **Thread** 通过自己创建的独立线程来执行Task，也可以使用	**AsyncThread**函数
+	- **ThreadPool** 通过线程池来执行Task，也可以使用**AsyncPool**函数
+	- **LargeThreadPool** 通过编辑器专用的线程池来执行Task
+
+- 通过实例化**FAsyncTask**或者**FAutoDeleteAsyncTask**模板来实现使用线程池
+	FAsyncTask和FAutoDeleteAsyncTask的区别是，FAutoDeleteAsyncTask会在任务完成之后自动delete对应的Task。而FAsyncTask需要我们手动去管理Task的生命周期。
+	```cpp
+	void DoWork()
+	{
+		UE::FInheritedContextScope InheritedContextScope = 	RestoreInheritedContext();
+		FScopeCycleCounter Scope(Task.GetStatId(), true);
+	
+		Task.DoWork();
+		delete this;
+	}
+	```
+	下面是两个官方给出的使用这两个模板类的示例：
+	```cpp
+	class ExampleAutoDeleteAsyncTask : public FNonAbandonableTask
+	{
+		friend class 	FAutoDeleteAsyncTask<ExampleAutoDeleteAsyncTask>;
+	
+		int32 ExampleData;
+	
+		ExampleAutoDeleteAsyncTask(int32 InExampleData)
+		 : ExampleData(InExampleData)
+		{
+		}
+	
+		void DoWork()
+		{
+			... do the work here
+		}
+	
+		FORCEINLINE TStatId GetStatId() const
+		{
+			RETURN_QUICK_DECLARE_CYCLE_STAT	(ExampleAutoDeleteAsyncTask, 	STATGROUP_ThreadPoolAsyncTasks);
+		}
+	};
+	
+	
+	void Example()
+	{
+		// start an example job
+		(new FAutoDeleteAsyncTask<ExampleAutoDeleteAsyncTask>(5)	->StartBackgroundTask();
+	
+		// do an example job now, on this thread
+		(new FAutoDeleteAsyncTask<ExampleAutoDeleteAsyncTask>(5)	->StartSynchronousTask();
+	}
+	```
+
 #### FRunnableThread
 FRunnableThread 是UE中所有线程的基类，根据不同的平台有不同的实现。例如在Windows平台的FRunnableThreadWin，以及通过pthread实现的FRunnableThreadPThread等等。
 线程在创建成功之后，会先加入到FThreadManager之中，然后再调用FRunnableThread::Run函数，而后会调用FRunnable::Run
