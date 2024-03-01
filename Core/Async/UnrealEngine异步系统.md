@@ -809,7 +809,7 @@ FTaskGraphInterface <|-- FTaskGraphCompatibilityImplementation
 @enduml
 ```
 #### FTaskGraphInterface
-在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation和FTaskGraphCompatibilityImplementation来完成，是一个单例类。
+在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation和FTaskGraphCompatibilityImplementation来完成，是一个单例类。UE4中FTaskGraphInterface只有FTaskGraphImplementation一个实现，FTaskGraphCompatibilityImplementation是UE5中新的实现，也是UE5中默认实现。也可以通过**GUseNewTaskBackend**切换到旧的实现方式。
 
 在TaskGraph中，有两中类型的线程，一个是NamedThread，一个是AnyThread。分别对应FNamedTaskThread和FTaskThreadAnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
 - RHIThread RHI线程
@@ -1253,7 +1253,7 @@ FTaskThreadAnyThread 代表了两种线程中的AnyThread，它的数量会在FT
 
 ```
 
-可以从上面看出来，最终调用到了FBaseGraphTask::Excute。
+可以从上面看出来，首先通过FinWork去获取当前的Thread需要
 
 ##### FNamedTaskThread
 FNamedTaskThread 代表了两种线程中的NamedThread，它的数量和当前的设置和引擎的版本都有关。例如在UE4中，有Stats和Audio相关的NamedThread，在升级到UE5的时候被移除了。而且UE4中，也只有STATS宏打开的时候会有StatsThread。
