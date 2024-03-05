@@ -18,6 +18,7 @@
       - [FQueuedThreadPoolBase](#fqueuedthreadpoolbase)
     - [TaskGraph的实现](#taskgraph的实现)
     - [FTaskGraphInterface](#ftaskgraphinterface)
+    - [TaskGraph运行流程](#taskgraph运行流程)
       - [FTaskGraphImplementation](#ftaskgraphimplementation)
     - [FTaskThreadBase](#ftaskthreadbase)
       - [FTaskThreadAnyThread](#ftaskthreadanythread)
@@ -26,7 +27,6 @@
       - [模板参数TTask](#模板参数ttask)
       - [FConstructor](#fconstructor)
     - [FGraphEvent](#fgraphevent)
-    - [TaskGraph运行流程](#taskgraph运行流程)
 
 <!-- /code_chunk_output -->
 
@@ -1023,6 +1023,30 @@ int32 FEngineLoop::PreInitPreStartupScreen(const TCHAR* CmdLine)
 
 ```
 
+#### TaskGraph运行流程
+```mermaid
+graph TB
+DispathReady[ConstructAndDispatchWhenReady] --bUnlock=true--> SetupPrereqs[TGraphTask::SetupPrereqs] --> PreComplete[FBaseGraphTask::PrerequisitesComplete] -->Unlock{bUnlock}
+
+TaskQueueTask[FBaseGraphTask::QueueTask] --> InterfaceQueueTask{FTaskGraphInterface::QueueTask}
+
+Unlock -->|bUnlock=true| TaskQueueTask
+
+Hold[ConstructAndHold] --bUnnlock=false--> SetupPrereqs
+
+Unlock -->|bUnlock=false| WaitForUnlock[WaitForUnlock]
+WaitForUnlock --> ConditionalQueueTask[FBaseGraphTask::ConditionalQueueTask] --> TaskQueueTask
+
+InterfaceQueueTask -->|AnyThread| StartTaskThread[FTaskGraphImplementation::StartTaskThread]
+StartTaskThread --> WakeUp[FTaskThreadAnyThread::WakeUp] --> ProcessTasks[FTaskThreadAnyThread::ProcessTasks] --> Excute[FBaseGraphTask::Execute] --> ExcuteTask[TGraphTask::ExcuteTask]
+
+InterfaceQueueTask -->|NamedThread| NamedThreadChoice{ThreadToExecuteOn==CurrentThreadIfKnown}
+
+NamedThreadChoice -->|true| EnqueueFromThisThread[FTaskThreadBase::EnqueueFromThisThread]
+NamedThreadChoice -->|false| EnqueueFromOtherThread[FTaskThreadBase::EnqueueFromOtherThread]
+
+```
+
 ##### FTaskGraphImplementation
 FTaskGraphImplementation在初始化时候，会根据当前系统的核心数量和配置初始化一定数量的Worker。对于AnyThread，还会创建其对应的FRunnableThread，计算对应线程的Affinity。
 
@@ -1253,7 +1277,50 @@ FTaskThreadAnyThread 代表了两种线程中的AnyThread，它的数量会在FT
 
 ```
 
-可以从上面看出来，首先通过FinWork去获取当前的Thread需要
+可以从上面看出来，首先通过FinWork去获取当前的Thread需要的Task，如果没有获取到Task，就会阻塞休眠当前线程直到被唤醒。如果获取到了Task，则会运行对应的Task。
+```mermaid
+graph TB
+TaskRun[FTaskThreadAnyThread::Run] --> ProcessTasksUntilQuit[FTaskThreadAnyThread::ProcessTasksUntilQuit]
+ProcessTasksUntilQuit --> ProcessShutDown{QuitForShutdown}
+ProcessShutDown --QuitForShutdown=false--> ProcessTasks[ProcessTasks]
+ProcessShutDown --QuitForShutdown=true--> PrcessEnd[ProcessTasksUntilQuit--End]
+ProcessTasks --> FindWork[FTaskThreadAnyThread::FindWork]
+FindWork --Task!=nullptr--> ShutDown{QuitForShutdown}
+FindWork --Task==nullptr--> Wait[FEvent::Wait]
+ShutDown --QuitForShutdown=false--> ExcuteTask[ExcuteTask]
+ShutDown --QuitForShutdown=true--> ProcessTasksUntilQuit
+WakeUp[FTaskThreadAnyThread::WakeUp] --WakeUp--> Wait
+Wait --> ShutDown
+ExcuteTask --> FindWork
+```
+
+FindWork会从**IncomingAnyThreadTasks**从去找到对应的Task，IncomingAnyThreadTasks是一个所有AnyThread公用的一个列表。这里面会记录所有需要AnyTread去运行的Task。
+```cpp
+FBaseGraphTask* FindWork(ENamedThreads::Type ThreadInNeed) override
+{
+	int32 LocalNumWorkingThread = GetNumWorkerThreads() + GNumWorkerThreadsToIgnore;
+	int32 MyIndex = int32((uint32(ThreadInNeed) - NumNamedThreads) % NumTaskThreadsPerSet);
+	int32 Priority = int32((uint32(ThreadInNeed) - NumNamedThreads) / NumTaskThreadsPerSet);
+	check(MyIndex >= 0 && MyIndex < LocalNumWorkingThread &&
+		Priority >= 0 && Priority < ENamedThreads::NumThreadPriorities);
+
+	return IncomingAnyThreadTasks[Priority].Pop(MyIndex, true);
+}
+```
+IncomingAnyThreadTasks会在函数FTaskGraphInterface::QueueTask中，当需要在AnyThread中运行Task的时候添加任务
+```cpp
+uint32 PriIndex = TaskPriority ? 0 : 1;
+check(Priority >= 0 && Priority < MAX_THREAD_PRIORITIES);
+{
+	TASKGRAPH_SCOPE_CYCLE_COUNTER(STAT_TaskGraph_QueueTask_IncomingAnyThreadTasPush);
+	int32 IndexToStart = IncomingAnyThreadTa[Priority].Push(Task, PriIndex);
+	if (IndexToStart >= 0)
+	{
+		StartTaskThread(Priority, IndexToStart);
+	}
+}
+```
+
 
 ##### FNamedTaskThread
 FNamedTaskThread 代表了两种线程中的NamedThread，它的数量和当前的设置和引擎的版本都有关。例如在UE4中，有Stats和Audio相关的NamedThread，在升级到UE5的时候被移除了。而且UE4中，也只有STATS宏打开的时候会有StatsThread。
@@ -1261,6 +1328,152 @@ FNamedTaskThread 代表了两种线程中的NamedThread，它的数量和当前�
 FNamedTaskThread相对于FTaskThreadAnyThread还多了一个Queue的区分，分为MainQueue和LocalQueue。
 - MainQueue
 - LocalQueu
+
+而且每一个FNamedTaskThread内部还维护了一个Task队列**FThreadTaskQueue Queues[ENamedThreads::NumQueues]**，两个Queue分别有自己的队列。
+```cpp
+struct FThreadTaskQueue
+{
+	FStallingTaskQueue<FBaseGraphTask, PLATFORM_CACHE_LINE_SIZE, 2> StallQueue;
+
+	/** We need to disallow reentry of the processing loop **/
+	uint32 RecursionGuard;
+
+	/** Indicates we executed a return task, so break out of the processing loop. **/
+	bool QuitForReturn;
+
+	/** Indicates we executed a return task, so break out of the processing loop. **/
+	bool QuitForShutdown;
+
+	/** Event that this thread blocks on when it runs out of work. **/
+	FEvent*	StallRestartEvent;
+
+	FThreadTaskQueue()
+		: RecursionGuard(0)
+		, QuitForReturn(false)
+		, QuitForShutdown(false)
+		, StallRestartEvent(FPlatformProcess::GetSynchEventFromPool(false))
+	{
+
+	}
+	~FThreadTaskQueue()
+	{
+		FPlatformProcess::ReturnSynchEventToPool(StallRestartEvent);
+		StallRestartEvent = nullptr;
+	}
+};
+```
+
+FNamedTaskThread会通过**FNamedTaskThread::ProcessTasksNamedThread**从队列中取出任务来运行。
+```cpp
+	uint64 ProcessTasksNamedThread(int32 QueueIndex, bool bAllowStall)
+	{
+		uint64 ProcessedTasks = 0;
+#if UE_EXTERNAL_PROFILING_ENABLED
+		static thread_local bool bOnce = false;
+		if (!bOnce)
+		{
+			FExternalProfiler* Profiler = FActiveExternalProfilerBase::GetActiveProfiler();
+			if (Profiler)
+			{
+				Profiler->SetThreadName(ThreadIdToName(ThreadId));
+			}
+			bOnce = true;
+		}
+#endif
+
+		TStatId StallStatId;
+		bool bCountAsStall = false;
+#if STATS
+		TStatId StatName;
+		FCycleCounter ProcessingTasks;
+		if (ThreadId == ENamedThreads::GameThread)
+		{
+			StatName = GET_STATID(STAT_TaskGraph_GameTasks);
+			StallStatId = GET_STATID(STAT_TaskGraph_GameStalls);
+			bCountAsStall = true;
+		}
+		else if (ThreadId == ENamedThreads::GetRenderThread())
+		{
+			if (QueueIndex > 0)
+			{
+				StallStatId = GET_STATID(STAT_TaskGraph_RenderStalls);
+				bCountAsStall = true;
+			}
+			// else StatName = none, we need to let the scope empty so that the render thread submits tasks in a timely manner. 
+		}
+		else
+		{
+			StatName = GET_STATID(STAT_TaskGraph_OtherTasks);
+			StallStatId = GET_STATID(STAT_TaskGraph_OtherStalls);
+			bCountAsStall = true;
+		}
+		bool bTasksOpen = false;
+		if (FThreadStats::IsCollectingData(StatName))
+		{
+			bTasksOpen = true;
+			ProcessingTasks.Start(StatName);
+		}
+#endif
+		const bool bIsRenderThreadMainQueue = (ENamedThreads::GetThreadIndex(ThreadId) == ENamedThreads::ActualRenderingThread) && (QueueIndex == 0);
+		while (!Queue(QueueIndex).QuitForReturn)
+		{
+			const bool bIsRenderThreadAndPolling = bIsRenderThreadMainQueue && (GRenderThreadPollPeriodMs >= 0);
+			const bool bStallQueueAllowStall = bAllowStall && !bIsRenderThreadAndPolling;
+			FBaseGraphTask* Task = Queue(QueueIndex).StallQueue.Pop(0, bStallQueueAllowStall);
+			TestRandomizedThreads();
+			if (!Task)
+			{
+#if STATS
+				if (bTasksOpen)
+				{
+					ProcessingTasks.Stop();
+					bTasksOpen = false;
+				}
+#endif
+				if (bAllowStall)
+				{
+					TRACE_CPUPROFILER_EVENT_SCOPE(WaitForTasks);
+					{
+						FScopeCycleCounter Scope(StallStatId, EStatFlags::Verbose);
+						Queue(QueueIndex).StallRestartEvent->Wait(bIsRenderThreadAndPolling ? GRenderThreadPollPeriodMs : MAX_uint32, bCountAsStall);
+						if (Queue(QueueIndex).QuitForShutdown)
+						{
+							return ProcessedTasks;
+						}
+						TestRandomizedThreads();
+					}
+#if STATS
+					if (!bTasksOpen && FThreadStats::IsCollectingData(StatName))
+					{
+						bTasksOpen = true;
+						ProcessingTasks.Start(StatName);
+					}
+#endif
+					continue;
+				}
+				else
+				{
+					break; // we were asked to quit
+				}
+			}
+			else
+			{
+				Task->Execute(NewTasks, ENamedThreads::Type(ThreadId | (QueueIndex << ENamedThreads::QueueIndexShift)), true);
+				ProcessedTasks++;
+				TestRandomizedThreads();
+			}
+		}
+#if STATS
+		if (bTasksOpen)
+		{
+			ProcessingTasks.Stop();
+			bTasksOpen = false;
+		}
+#endif
+		return ProcessedTasks;
+	}
+```
+
 
 
 #### FBaseGraphTask
@@ -1367,28 +1580,4 @@ virtual void TriggerEventWhenTasksComplete(FEvent* InEvent, const FGraphEventArr
 	}
 	TGraphTask<FTriggerEventGraphTask>::CreateTask(&Tasks, CurrentThreadIfKnown).ConstructAndDispatchWhenReady(InEvent, TriggerThread);
 }
-```
-
-#### TaskGraph运行流程
-```mermaid
-graph TB
-DispathReady[ConstructAndDispatchWhenReady] --bUnlock=true--> SetupPrereqs[TGraphTask::SetupPrereqs] --> PreComplete[FBaseGraphTask::PrerequisitesComplete] -->Unlock{bUnlock}
-
-TaskQueueTask[FBaseGraphTask::QueueTask] --> InterfaceQueueTask{FTaskGraphInterface::QueueTask}
-
-Unlock -->|bUnlock=true| TaskQueueTask
-
-Hold[ConstructAndHold] --bUnnlock=false--> SetupPrereqs
-
-Unlock -->|bUnlock=false| WaitForUnlock[WaitForUnlock]
-WaitForUnlock --> ConditionalQueueTask[FBaseGraphTask::ConditionalQueueTask] --> TaskQueueTask
-
-InterfaceQueueTask -->|AnyThread| StartTaskThread[FTaskGraphImplementation::StartTaskThread]
-StartTaskThread --> WakeUp[FTaskThreadAnyThread::WakeUp] --> ProcessTasks[FTaskThreadAnyThread::ProcessTasks] --> Excute[FBaseGraphTask::Execute] --> ExcuteTask[TGraphTask::ExcuteTask]
-
-InterfaceQueueTask -->|NamedThread| NamedThreadChoice{ThreadToExecuteOn==CurrentThreadIfKnown}
-
-NamedThreadChoice -->|true| EnqueueFromThisThread[FTaskThreadBase::EnqueueFromThisThread]
-NamedThreadChoice -->|false| EnqueueFromOtherThread[FTaskThreadBase::EnqueueFromOtherThread]
-
 ```
