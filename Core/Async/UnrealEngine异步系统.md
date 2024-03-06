@@ -811,7 +811,7 @@ FTaskGraphInterface <|-- FTaskGraphCompatibilityImplementation
 #### FTaskGraphInterface
 在TaskGraph中，FTaskGraphInterface是TaskGraph的接口类，用管理TaskGraph相关的工作，具体的实现在FTaskGraphImplementation和FTaskGraphCompatibilityImplementation来完成，是一个单例类。UE4中FTaskGraphInterface只有FTaskGraphImplementation一个实现，FTaskGraphCompatibilityImplementation是UE5中新的实现，也是UE5中默认实现。也可以通过**GUseNewTaskBackend**切换到旧的实现方式。
 
-在TaskGraph中，有两中类型的线程，一个是NamedThread，一个是AnyThread。分别对应FNamedTaskThread和FTaskThreadAnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
+在TaskGraph中，有两种类型的线程，一个是NamedThread，一个是AnyThread。分别对应FNamedTaskThread和FTaskThreadAnyThread。AnyTread会在TaskGraph初始化的时候被创建出来。NamedThread会在该类型的线程创建的时候Attach到相应的Workder中。目前支持的NamedThread有：
 - RHIThread RHI线程
 - GameThread 游戏线程
 - RenderThread 渲染线程
@@ -841,6 +841,9 @@ enum Type : int32
 - BackgroundThreadPriority  低优先级线程
 
 然后还可以通过这些不同的flag进行组合，组合成不同类型。同时由于这些Flag占用了不同位，所以也可以通过位运算，将其中的不同的属性单独拿出来。UE中也定义了相应的函数。最后这些所有属性的组合决定了我们当前的任务在哪一个线程中来运行。例如AnyHiPriThreadNormalTask就是运行在一个高优先级AnyThread的普通优先级的任务。
+
+|10和11位用来表示线程的优先级|9位用来表示任务的优先级|8位用来表示NamedThread 任务队列|0~7位用来表示当前的线程类型|
+|:--:|:--:|:--:|:--:|
 
 ```cpp
 enum Type : int32
