@@ -24,8 +24,9 @@
       - [FTaskThreadAnyThread](#ftaskthreadanythread)
       - [FNamedTaskThread](#fnamedtaskthread)
     - [FBaseGraphTask](#fbasegraphtask)
-      - [模板参数TTask](#模板参数ttask)
+      - [TGraphTask模板参数TTask](#tgraphtask模板参数ttask)
       - [FConstructor](#fconstructor)
+      - [ExecuteTask](#executetask)
     - [FGraphEvent](#fgraphevent)
 
 <!-- /code_chunk_output -->
@@ -1480,9 +1481,9 @@ FNamedTaskThread会通过**FNamedTaskThread::ProcessTasksNamedThread**从队列�
 
 
 #### FBaseGraphTask
-FBaseGraphTask是TaskGraph中所有Task的基类，线程在执行任务时会调用FBaseGraphTask::ExecuteTask。FBaseGraphTask本身是一个抽象类，UE实现了一个模板类TGraphTask用于设置前置任务和后续任务。TGraphTask中还有一个辅助类FConstructor用于任务的创建。
+FBaseGraphTask是TaskGraph中所有Task的基类，线程在执行任务时会调用FBaseGraphTask::ExecuteTask。FBaseGraphTask本身是一个抽象类，UE实现了一个模板类TGraphTask用于调度我们自定义的任务模板。TGraphTask本身是final的，所以不可以再被继承。
 
-##### 模板参数TTask
+##### TGraphTask模板参数TTask
 TGraphTask中完善了设置前置任务和后置任务，以及执行任务的代码。由于是一个模板类，所以在实现中调用了一些模板的函数，所以实例化TGraphTask的模板参数需要满足一些条件。不然在生成模板代码的时候，会出现编译错误。UE在注释中给出了这个例子：
 ```cpp
 class FGenericTask
@@ -1517,14 +1518,75 @@ public:
 ```
 
 ##### FConstructor
-FConstructor中有两个公共接口FGraphEventRef ConstructAndDispatchWhenReady(T&&... Args)和TGraphTask* ConstructAndHold(T&&... Args)：
+FConstructor主要就是用来方便构造Task。FConstructor中有两个公共接口FGraphEventRef ConstructAndDispatchWhenReady(T&&... Args)和TGraphTask* ConstructAndHold(T&&... Args)：
 - TGraphTask* ConstructAndHold(T&&... Args) 创建一个新的Task, 暂时不加入到任务队列，需要手动调用加入到任务队列中去执行，例如调用TGraphTask::Unlock
 - FGraphEventRef ConstructAndDispatchWhenReady(T&&... Args) 创建一个新的Task，并加入到任务队列，在合适的时机开始执行
 
+ConstructAndHold和ConstructAndDispatchWhenReady主要的区别就在于构造的时候调用**SetupPrereqs**的第三个参数不同。这个参数最终会在**PrerequisitesComplete**中使用。这个参数会决定，在前置条件已经满足的条件下，是否将任务加入到任务列表中去执行。
+```cpp
+void PrerequisitesComplete(ENamedThreads::Type CurrentThread, int32 NumAlreadyFinishedPrequistes, bool bUnlock = true)
+{
+	checkThreadGraph(LifeStage.Increment() == int32(LS_PrequisitesSetup));
+	int32 NumToSub = NumAlreadyFinishedPrequistes + (bUnlock ? 1 : 0); // the +1 is for the "lock" we set up in the constructor
+	if (NumberOfPrerequistitesOutstanding.Subtract(NumToSub) == NumToSub) 
+	{
+		bool bWakeUpWorker = true;
+		QueueTask(CurrentThread, bWakeUpWorker);	
+	}
+}
+```
+
+##### ExecuteTask
+ExecuteTask是最终执行任务时候会调用到的函数，在这个函数中会调用我们自定义的DoTask，从而完成我们需要的需求。在完成
+```cpp
+void ExecuteTask(TArray<FBaseGraphTask*>& NewTasks, ENamedThreads::Type CurrentThread, bool bDeleteOnCompletion) override
+{
+	checkThreadGraph(TaskConstructed);
+
+	// Fire and forget mode must not have subsequents
+	// Track subsequents mode must have subsequents
+	checkThreadGraph(XOR(TTask::GetSubsequentsMode() == ESubsequentsMode::FireAndForget, IsValidRef(Subsequents)));
+
+	if (TTask::GetSubsequentsMode() == ESubsequentsMode::TrackSubsequents)
+	{
+		Subsequents->CheckDontCompleteUntilIsEmpty(); // we can only add wait for tasks while executing the task
+	}
+	
+	TTask& Task = *(TTask*)&TaskStorage;
+	{
+		TaskTrace::FTaskTimingEventScope TaskEventScope(GetTraceId());
+		FScopeCycleCounter Scope(Task.GetStatId(), true);
+		Task.DoTask(CurrentThread, Subsequents);
+		Task.~TTask();
+		checkThreadGraph(ENamedThreads::GetThreadIndex(CurrentThread) <= ENamedThreads::GetRenderThread() || FMemStack::Get().IsEmpty()); // you must mark and pop memstacks if you use them in tasks! Named threads are excepted.
+	}
+	
+	TaskConstructed = false;
+
+	if (TTask::GetSubsequentsMode() == ESubsequentsMode::TrackSubsequents)
+	{
+		FPlatformMisc::MemoryBarrier();
+		Subsequents->DispatchSubsequents(NewTasks, CurrentThread, true);
+	}
+	else
+	{
+		// "fire and forget" tasks don't have an accompanying FGraphEvent that traces completion and destruction
+		TaskTrace::Completed(GetTraceId());
+		TaskTrace::Destroyed(GetTraceId());
+	}
+
+	if (bDeleteOnCompletion)
+	{
+		DeleteTask();
+	}
+}
+
+```
+
 #### FGraphEvent
 FGraphEvent是一个后续任务的集合，依赖的任务完成之后，才会将后续的任务放入TaskGraph的任务队列中进行执行。在FGraphEvent中通过一个Lock Free的表**SubsequentList**来保存后续的任务，同时也可以保证访问后续任务时的效率。它本身有一个引用计数来控制它的生命周期。FGraphEvent主要有以下几个接口：
-- FGraphEvent::AddSubsequent 添加后续新的任务
-- FGraphEvent::DispatchSubsequents 执行后续的任务，会在FBaseGraphTask被执行调用Excute的时候被调用
+- FGraphEvent::AddSubsequent 添加后续新的任务，会在SetupPrereqs中调用
+- FGraphEvent::DispatchSubsequents 执行后续的任务，会在FBaseGraphTask被执行调用Excute执行完对应的Task后被调用
 - FGraphEvent::Wait 等待直到当前任务被执行完
 - FGraphEvent::AddRef && FGraphEvent::Release 增加减少FGraphEvent的引用计数
 
@@ -1582,5 +1644,84 @@ virtual void TriggerEventWhenTasksComplete(FEvent* InEvent, const FGraphEventArr
 		return;
 	}
 	TGraphTask<FTriggerEventGraphTask>::CreateTask(&Tasks, CurrentThreadIfKnown).ConstructAndDispatchWhenReady(InEvent, TriggerThread);
+}
+```
+
+**FGraphEvent::DispatchSubsequents**会在当前的任务执行完成之后，用于执行后续的任务。后续任务会根据自己的前置条件是否完成来决定是否将自己加入到任务列表中去，这部分逻辑在FBaseGraphTask::ConditionalQueueTask中。
+```cpp
+void FGraphEvent::DispatchSubsequents(TArray<FBaseGraphTask*>& NewTasks, ENamedThreads::Type CurrentThreadIfKnown, bool bInternal/* = false */)
+{
+	if (EventsToWaitFor.Num())
+	{
+		// need to save this first and empty the actual tail of the task might be recycled faster than it is cleared.
+		FGraphEventArray TempEventsToWaitFor;
+		Exchange(EventsToWaitFor, TempEventsToWaitFor);
+
+		bool bSpawnGatherTask = true;
+
+		if (GTestDontCompleteUntilForAlreadyComplete)
+		{
+			bSpawnGatherTask = false;
+			for (FGraphEventRef& Item : TempEventsToWaitFor)
+			{
+				if (!Item->IsComplete())
+				{
+					bSpawnGatherTask = true;
+					break;
+				}
+			}
+		}
+
+		if (bSpawnGatherTask)
+		{
+			// create the Gather...this uses a special version of private CreateTask that "assumes" the subsequent list (which other threads might still be adding too).
+			DECLARE_CYCLE_STAT(TEXT("FNullGraphTask.DontCompleteUntil"), STAT_FNullGraphTask_DontCompleteUntil, STATGROUP_TaskGraphTasks);
+
+			ENamedThreads::Type LocalThreadToDoGatherOn = ENamedThreads::AnyHiPriThreadHiPriTask;
+			if (!GIgnoreThreadToDoGatherOn)
+			{
+				//LocalThreadToDoGatherOn = ThreadToDoGatherOn;
+				ENamedThreads::Type CurrentThreadIndex = ENamedThreads::GetThreadIndex(CurrentThreadIfKnown);
+				if (CurrentThreadIndex <= ENamedThreads::ActualRenderingThread)
+				{
+					LocalThreadToDoGatherOn = CurrentThreadIndex;
+				}
+			}
+
+//#if UE_TASK_TRACE_ENABLED
+//			// regenerate TraceId as we're going to use the same event with another task
+//			TraceId = TaskTrace::GenerateTaskId();
+//#endif
+			TGraphTask<FNullGraphTask>::CreateTask(FGraphEventRef(this), &TempEventsToWaitFor, CurrentThreadIfKnown).ConstructAndDispatchWhenReady(GET_STATID(STAT_FNullGraphTask_DontCompleteUntil), LocalThreadToDoGatherOn);
+			return;
+		}
+	}
+
+	bool bWakeUpWorker = false;
+	TArray<FBaseGraphTask*> PoppedTasks;
+	SubsequentList.PopAllAndClose(PoppedTasks);
+	for (FBaseGraphTask* NewTask : ReverseIterate(PoppedTasks)) // reverse the order since PopAll is implicitly backwards
+	{
+		checkThreadGraph(NewTask);
+		NewTask->ConditionalQueueTask(CurrentThreadIfKnown, bWakeUpWorker);
+	}
+
+	if (!bInternal)
+	{
+		TaskTrace::Launched(GetTraceId(), TEXT("Standalone graph event"), true, ENamedThreads::AnyThread, sizeof(FGraphEvent));
+	}
+	TaskTrace::Completed(GetTraceId());
+}
+```
+FGraphEvent::DispatchSubsequents首先检查了是否有正在等待的事件，如果有就会在当前任务和需要等待的事件之间插入一个FNullGraphTask任务。FNullGraphTask不会做任何事情，他的作用就只是把多个需要等待的任务汇集到一个前置任务中。然后就调用FBaseGraphTask::ConditionalQueueTask去更新后续任务中的前置任务计数。
+其中FBaseGraphTask::ConditionalQueueTask中会通过一个原子变量去统计当前的前置任务的数量，当前置任务的数量为0的时候，就会加任务加入到任务队列中。
+```cpp
+void ConditionalQueueTask(ENamedThreads::Type CurrentThread, bool& bWakeUpWorker)
+{
+	if (NumberOfPrerequistitesOutstanding.Decrement()==0)
+	{
+		QueueTask(CurrentThread, bWakeUpWorker);
+		bWakeUpWorker = true;
+	}
 }
 ```
