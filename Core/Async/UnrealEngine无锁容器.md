@@ -25,12 +25,32 @@ struct FIndexedLockFreeLink
 	+ uint32 SingleNext
 }
 
-FIndexedPointer *-- FIndexedLockFreeLink
+FIndexedPointer <-- FIndexedLockFreeLink
 
 struct FLockFreeLinkPolicy
 {
+    + typedef FIndexedPointer TDoublePtr;
+    + typedef FIndexedLockFreeLink TLink;
+    + typedef uint32 TLinkPtr;
+    + typedef TLockFreeAllocOnceIndexedAllocator<FIndexedLockFreeLink, MAX_LOCK_FREE_LINKS, 16384> TAllocator;
 
+    {static} + TAllocator LinkAllocator
 }
+
+TLockFreeAllocOnceIndexedAllocator <-- FLockFreeLinkPolicy
+
+class LockFreeLinkAllocator_TLSCache
+{
+    + void Push(TLinkPtr Item) TSAN_SAFE
+    + TLinkPtr Pop() TSAN_SAFE
+    - uint32 TlsSlot
+    - FLockFreePointerListLIFORoot<PLATFORM_CACHE_LINE_SIZE> GlobalFreeListBundles
+}
+
+FLockFreeLinkPolicy <.. LockFreeLinkAllocator_TLSCache
+FIndexedLockFreeLink <.. LockFreeLinkAllocator_TLSCache
+FIndexedPointer <.. LockFreeLinkAllocator_TLSCache
+FLockFreePointerListLIFORoot <-- LockFreeLinkAllocator_TLSCache
 
 class FLockFreePointerListLIFORoot
 {
