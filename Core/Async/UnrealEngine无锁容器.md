@@ -198,3 +198,113 @@ FORCEINLINE void SetCounterAndState(uint64 To)
 }
 ```
 
+#### FLockFreeLinkPolicy和LockFreeLinkAllocator_LSCache
+FLockFreeLinkPolicy包装了TLockFreeAllocOnceIndexedAllocator，然后在内部和LockFreeLinkAllocator_LSCache一起作为了整个LockFree容器的内存分配器。
+
+##### LockFreeLinkAllocator_TLSCache
+```plantuml
+@startuml
+class LockFreeLinkAllocator_TLSCache
+{
+    + TLinkPtr Pop() TSAN_SAFE
+    + void Push(TLinkPtr Item) TSAN_SAFE
+    - uint32 TlsSlot
+    - FLockFreePointerListLIFORoot<PLATFORM_CACHE_LINE_SIZE> GlobalFreeListBundles
+}
+
+FNoncopyable <|-- LockFreeLinkAllocator_TLSCache
+
+struct FThreadLocalCache
+{
+    + TLinkPtr FullBundle
+    + TLinkPtr PartialBundle
+    + int32 NumPartial
+}
+
+@enduml
+```
+
+LockFreeLinkAllocator_TLSCache为每一个线程，在其线程内部的存储中（TLS）中保存了当前线程分配的节点，这样可以提高效率，而且每个线程之前也不会互相干扰，不需要加锁等同步操作。
+FThreadLocalCache为保存在TLS中的一个链表，保存了当前线程分配的节点。FThreadLocalCache::PartialBundle保存了当前可用节点的头节点，其中TLink::Payload用来保存了下一个节点的索引。
+- Pop 如果没有分配好节点，则会从GlobalFreeListBundles从分配好对应的节点，然后返回节点。如果已经分配好，则会直接返回节点。
+- Push 将节点返回池中，这里是通过设置节点的TLink::Payload属性来完成的，设置为指向下一个空闲节点的索引。
+
+###### LockFreeLinkAllocator_TLSCache::Pop
+```cpp
+TLinkPtr Pop() TSAN_SAFE
+{
+	FThreadLocalCache& TLS = GetTLS();
+
+	if (!TLS.PartialBundle)
+	{
+		if (TLS.FullBundle)
+		{
+			TLS.PartialBundle = TLS.FullBundle;
+			TLS.FullBundle = 0;
+		}
+		else
+		{
+			TLS.PartialBundle = GlobalFreeListBundles.Pop();
+			if (!TLS.PartialBundle)
+			{
+				int32 FirstIndex = FLockFreeLinkPolicy::LinkAllocator.Alloc(NUM_PER_BUNDLE);
+				for (int32 Index = 0; Index < NUM_PER_BUNDLE; Index++)
+				{
+					TLink* Event = FLockFreeLinkPolicy::IndexToLink(FirstIndex + Index);
+					Event->DoubleNext.Init();
+					Event->SingleNext = 0;
+					Event->Payload = (void*)UPTRINT(TLS.PartialBundle);
+					TLS.PartialBundle = FLockFreeLinkPolicy::IndexToPtr(FirstIndex + Index);
+				}
+			}
+		}
+		TLS.NumPartial = NUM_PER_BUNDLE;
+	}
+	TLinkPtr Result = TLS.PartialBundle;
+	TLink* ResultP = FLockFreeLinkPolicy::DerefLink(TLS.PartialBundle);
+	TLS.PartialBundle = TLinkPtr(UPTRINT(ResultP->Payload));
+	TLS.NumPartial--;
+	//checkLockFreePointerList(TLS.NumPartial >= 0 && ((!!TLS.NumPartial) == (!!TLS.PartialBundle)));
+	ResultP->Payload = nullptr;
+	checkLockFreePointerList(!ResultP->DoubleNext.GetPtr() && !ResultP->SingleNext);
+	return Result;
+}
+```
+
+###### LockFreeLinkAllocator_TLSCache::Push
+```cpp
+void Push(TLinkPtr Item) TSAN_SAFE
+{
+	FThreadLocalCache& TLS = GetTLS();
+	if (TLS.NumPartial >= NUM_PER_BUNDLE)
+	{
+		if (TLS.FullBundle)
+		{
+			GlobalFreeListBundles.Push(TLS.FullBundle);
+			//TLS.FullBundle = nullptr;
+		}
+		TLS.FullBundle = TLS.PartialBundle;
+		TLS.PartialBundle = 0;
+		TLS.NumPartial = 0;
+	}
+	TLink* ItemP = FLockFreeLinkPolicy::DerefLink(Item);
+	ItemP->DoubleNext.SetPtr(0);
+	ItemP->SingleNext = 0;
+	ItemP->Payload = (void*)UPTRINT(TLS.PartialBundle);
+	TLS.PartialBundle = Item;
+	TLS.NumPartial++;
+}
+```
+
+
+#### FLockFreePointerListLIFORoot
+
+```plantuml
+@startuml
+class FLockFreePointerListLIFORoot<int TPaddingForCacheContention, uint64 TABAInc = 1>
+{
+
+    - alignas(TPaddingForCacheContention) TDoublePtr Head
+}
+@enduml
+```
