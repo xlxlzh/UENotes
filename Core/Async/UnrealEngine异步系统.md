@@ -82,14 +82,14 @@ class FThreadManager
     + void Tick()
 }
 
-FThreadManager *-- FRunnableThread
+FThreadManager o-- FRunnableThread
 
 abstract class FRunnable
 {
     - virtual uint32 Run()
 }
 
-FRunnable *-- FRunnableThread
+FRunnableThread o-- FRunnable
 
 abstract class IQueuedWork
 {
@@ -118,8 +118,8 @@ class FQueuedThread
 }
 
 FRunnable <|-- FQueuedThread
-IQueuedWork *-- FQueuedThread
-FRunnableThread *-- FQueuedThread
+FQueuedThread o-- IQueuedWork
+FQueuedThread *-- FRunnableThread
 
 abstract class FQueuedThreadPool
 {
@@ -146,8 +146,8 @@ class FQueuedThreadPoolBase
 }
 
 FQueuedThreadPool <|-- FQueuedThreadPoolBase
-FQueuedThread *-- FQueuedThreadPoolBase
-IQueuedWork *-- FQueuedThreadPoolBase
+FQueuedThreadPoolBase *-- FQueuedThread
+FQueuedThreadPoolBase o-- IQueuedWork
 
 note left of FQueuedThreadPoolBase::QueuedThreads
 当前线程池中空闲的线程
@@ -491,8 +491,8 @@ class FQueuedThread
 }
 
 FRunnable <|-- FQueuedThread
-IQueuedWork *-- FQueuedThread
-FRunnableThread *-- FQueuedThread
+FQueuedThread o-- IQueuedWork
+FQueuedThread *-- FRunnableThread
 
 abstract class FQueuedThreadPool
 {
@@ -519,7 +519,7 @@ class FQueuedThreadPoolBase
 }
 
 FQueuedThreadPool <|-- FQueuedThreadPoolBase
-FQueuedThread *-- FQueuedThreadPoolBase
+FQueuedThread o-- FQueuedThreadPoolBase
 IQueuedWork *-- FQueuedThreadPoolBase
 
 note left of FQueuedThreadPoolBase::QueuedThreads
